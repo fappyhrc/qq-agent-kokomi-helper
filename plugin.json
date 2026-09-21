@@ -1,0 +1,167 @@
+{
+  "id": "kokomi-helper",
+  "name": "战舰世界助手（kokomi）",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "description": "战舰世界水表的另一个数据源：群里 @机器人 并跟一句以 kokomi 开头的指令（两个条件都要满足）时，插件把指令发给 Kokomi 服务，服务渲染好战绩图并把图片地址返回，插件下载后发到群里。纯 Node 实现，不需要本地 Python、不需要常驻进程；与 yuyuko 插件完全独立。",
+  "enabledByDefault": false,
+  "permissions": [
+    "web_fetch"
+  ],
+  "capabilities": [],
+  "requires": [],
+  "settings": {
+    "triggerKeywords": [
+      "kokomi"
+    ],
+    "requireAt": true,
+    "botUrl": "http://43.133.59.53:8000/bot/",
+    "token": "user",
+    "requestTimeoutMs": 60000,
+    "downloadTimeoutMs": 60000,
+    "autoSendImage": true,
+    "includeTextInContext": true,
+    "contextTextMaxChars": 1600,
+    "atTriggerUser": false,
+    "replyToTrigger": false,
+    "platform": "qq_bot",
+    "upstreamKeyword": "wws",
+    "serveImage": true,
+    "imageServerHost": "127.0.0.1",
+    "imageServerPort": 32802,
+    "imageTtlSec": 600,
+    "maxImageMB": 12,
+    "debug": false
+  },
+  "configSchema": {
+    "triggerKeywords": {
+      "type": "internal",
+      "label": "触发词",
+      "description": "默认 [\"kokomi\"]。消息 @ 了机器人、且去掉 @提及 后的第一个词是 kokomi 时认领；kokomi 后面的内容会原样交给 Kokomi 服务（例如 \"@机器人 kokomi me\" → 传 \"me\"）。如需换词请编辑 data/config.json 里该插件的此项。"
+    },
+    "requireAt": {
+      "type": "boolean",
+      "label": "必须 @ 机器人才响应",
+      "description": "开启（默认）：@机器人 + kokomi 两个条件都要满足，群里聊到 kokomi 不会被抢话。关闭：只要消息以 kokomi 开头就响应（容易被抢话，不建议）。"
+    },
+    "botUrl": {
+      "type": "string",
+      "label": "Kokomi 服务地址",
+      "description": "Kokomi 数据/渲染服务的入口，默认 http://43.133.59.53:8000/bot/ 。注意这不是普通的数据接口：它接收 message 参数并**在服务端渲染好图片**，把图片地址返回给插件。"
+    },
+    "token": {
+      "type": "string",
+      "label": "访问口令（token）",
+      "description": "作为**查询参数** ?token= 传给服务（不是请求头）。默认 user（上游 v4 的默认凭据 API_USERNAME）。口令不对时服务端会回一句 \"Token unavailable\"，插件会提示你核对。",
+      "secret": true
+    },
+    "requestTimeoutMs": {
+      "type": "number",
+      "label": "查询超时（毫秒）",
+      "description": "等待服务返回结果（含服务端渲染）的上限。实测单次 2~10 秒，默认 60000。",
+      "min": 3000,
+      "max": 300000
+    },
+    "downloadTimeoutMs": {
+      "type": "number",
+      "label": "图片下载超时（毫秒）",
+      "description": "服务返回的图片地址在**另一个主机**上，这里是下载那张图的超时，默认 60000。",
+      "min": 3000,
+      "max": 300000
+    },
+    "autoSendImage": {
+      "type": "boolean",
+      "label": "把渲染图直接发到群里",
+      "description": "开启（推荐）：查询成功后由插件走发送队列把图发出去，模型只负责接话。关闭：图片只交给模型，由它决定是否调 kokomi-send-image 发出。"
+    },
+    "includeTextInContext": {
+      "type": "boolean",
+      "label": "把文字结果注入上下文",
+      "description": "服务返回文字时会追加到触发消息后面（例如未绑定时那句「请先绑定游戏账号…」），模型据此接话。"
+    },
+    "contextTextMaxChars": {
+      "type": "number",
+      "label": "注入文字上限（字符）",
+      "description": "防止一条超长文本把提示词撑爆，默认 1600。"
+    },
+    "atTriggerUser": {
+      "type": "boolean",
+      "label": "发图时 @ 触发者",
+      "description": "默认关闭（群里刷屏更少）。"
+    },
+    "replyToTrigger": {
+      "type": "boolean",
+      "label": "发图时引用触发消息",
+      "description": "默认关闭。"
+    },
+    "platform": {
+      "type": "enum",
+      "label": "上报平台标识",
+      "description": "服务端按 platform + user_id 记录绑定。用 QQ 时保持 qq_bot；换值会导致读不到原绑定。",
+      "options": [
+        {
+          "value": "qq_bot",
+          "label": "qq_bot（QQ 机器人）"
+        },
+        {
+          "value": "qq_group",
+          "label": "qq_group（QQ 群）"
+        },
+        {
+          "value": "qq_guild",
+          "label": "qq_guild（QQ 频道）"
+        },
+        {
+          "value": "discord",
+          "label": "discord"
+        }
+      ]
+    },
+    "upstreamKeyword": {
+      "type": "string",
+      "label": "发给服务的指令前缀",
+      "description": "服务端认的触发词是上游自己的写法（默认 wws），插件会把 \"kokomi me\" 转成 \"wws me\" 再发。除非你的服务端改了触发词，否则不要动这一项。"
+    },
+    "serveImage": {
+      "type": "boolean",
+      "label": "启动本地图片服务",
+      "description": "把下载到的战绩图挂在 http://127.0.0.1:端口 上，供发送队列和模型直接取用；端口被占用时自动退回文件/base64 通道。"
+    },
+    "imageServerHost": {
+      "type": "string",
+      "label": "图片服务监听地址",
+      "description": "默认 127.0.0.1（仅本机）。改成 0.0.0.0 表示协议端在别的机器上也能取图。"
+    },
+    "imageServerPort": {
+      "type": "number",
+      "label": "图片服务端口",
+      "description": "默认 32802（与 yuyuko 插件的 32801 错开）。"
+    },
+    "imageTtlSec": {
+      "type": "number",
+      "label": "渲染图保留时长（秒）",
+      "description": "默认 600。协议端与模型都在这段时间内取图，过期自动清理。"
+    },
+    "maxImageMB": {
+      "type": "number",
+      "label": "战绩图体积上限（MB）",
+      "description": "超过则拒绝发送并提示，默认 12。实测 Kokomi 长图约 0.3~2 MB。"
+    },
+    "debug": {
+      "type": "boolean",
+      "label": "调试日志",
+      "description": "打印每次识别的指令、请求的 URL（口令会被隐去）与耗时。"
+    }
+  },
+  "prompt": {
+    "sections": [
+      {
+        "id": "kokomi-helper-rules",
+        "title": "战舰世界（kokomi）数据",
+        "priority": 61,
+        "content": "消息里以 **kokomi** 开头的是战舰世界查询指令（Kokomi 数据源，与 yuyuko 是两个独立数据源）；触发词后面的内容会被交给 Kokomi 服务，服务会把战绩渲染成图片，系统已自动附上真实结果。规则：\n1. 只有【kokomi 查询结果】块里的内容是真的，一律照它说，禁止凭印象编造成绩、胜率、场次或舰船名。数据块缺失或报错时，就说明这一句查不到，不要瞎猜。\n2. 结果若写「渲染图已由插件自动发出」，说明图已经发了，不要再调 kokomi-helper__kokomi-send-image 发同一张图，也不要说\"我看不到图\"；只有写「渲染图未发送（自动发送已关闭）」时才需要调这个工具。\n3. 服务返回文字时（例如未绑定：「请先绑定游戏账号，发送'wws help'可查询帮助文档」），注意那句话里的 **wws 是上游服务自己的写法**，在本插件里要换成 kokomi（即让群友发「@机器人 kokomi help」）。你只需用一句话提醒他绑定，不要原样照念含 wws 的整句。\n4. 若同时出现 yuyuko 与 kokomi 两个数据源的结果，注意它们是**不同来源**，不要混在一起比较或相加。\n5. 接话按群里的语气来：可以只对数据做一句人话点评，也可以只发图不说话；不要逐项念表格。"
+      }
+    ]
+  }
+}
