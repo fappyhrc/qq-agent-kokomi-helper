@@ -16,7 +16,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { extractMentions, isBotMentioned, matchTrigger } from './lib/trigger.js';
 import { DEFAULTS, bindConfig, cfg } from './lib/config.js';
@@ -145,36 +145,85 @@ eq(manifest.settings.upstreamKeyword, 'wws', '发给服务的触发词前缀（�
 ok(!('bridgeUrl' in manifest.settings), '纯 Node 化后不再有「桥接服务地址」设置');
 ok(!('kokomiApiUsername' in manifest.settings), '不再有 v4 的接口用户名设置');
 
-console.log('\n— 自然语言 → 指令 的翻译能力（提示词里必须保留）—');
+console.log('\n— 自然语言 → 指令 的翻译能力（触发时才注入）—');
 {
-  // 这条能力靠"提示词 + 工具描述"共同实现，缺一处模型就不敢翻译。
-  // 改动提示词时若有测试挂掉，先想清楚是不是把这张指令表删了。
-  const prompt = manifest.prompt.sections[0].content;
-  const toolDesc = readFileSync(path.join(HERE, 'index.js'), 'utf8');
+  // 这条能力靠三处共同实现，缺一处就失效：
+  //   ① plugin.json 的常驻片段：只留"结论约束"（哪块是真的 / 别重复发图）
+  //   ② index.js 的 KOKOMI_PROMPT：完整指令表 + 翻译授权 + 防编造 + 兜底（触发时才注入）
+  //   ③ 工具 description：模型选工具时只读它，必须有翻译提示
+  const staticSection = manifest.prompt.sections[0].content;
+  const src = readFileSync(path.join(HERE, 'index.js'), 'utf8');
 
-  // 1) 指令表的关键分支必须在
-  for (const k of ['me', 'me info', 'me oper', 'me cw', 'me rank', 'me ship', 'me recent', 'me recents', 'me clan', 'bind']) {
-    ok(prompt.includes(`\`${k}`) || prompt.includes(`${k} `) || prompt.includes(`\`${k}\``), `提示词含指令分支：${k}`);
+  // ① 常驻片段应当"瘦"：指令表不该常驻
+  ok(staticSection.length < 600, `常驻片段足够短（${staticSection.length} 字符）`);
+  ok(!staticSection.includes('me recent'), '常驻片段不再包含指令表');
+  ok(staticSection.includes('kokomi'), '常驻片段仍说明触发词含义');
+  ok(/只有【kokomi 查询结果】/.test(staticSection), '常驻片段保留"数字照抄"硬规则');
+
+  // ② 动态片段（在 index.js 里）必须包含完整的翻译要素
+  for (const k of ['me info', 'me oper', 'me cw', 'me rank', 'me ship', 'me recent', 'me recents', 'me clan', 'bind']) {
+    ok(src.includes(`\`${k}`), `动态指令表含分支：${k}`);
   }
-  ok(prompt.includes('me <服务器> <昵称>'), '提示词含"查别人"的写法');
-  ok(prompt.includes('服务器取值'), '提示词含服务器取值说明');
-  ok(prompt.includes("'cn'") || prompt.includes('`cn`'), '提示词列出服务器枚举');
+  ok(src.includes('me <服务器> <昵称>'), '含"查别人"的写法');
+  ok(src.includes('服务器取值'), '含服务器取值说明');
+  ok(/翻译成 Kokomi 指令/.test(src), '明确授权翻译');
+  ok(/绝不猜/.test(src), '明确禁止编造参数');
+  ok(src.includes('帮助图'), '给出"看帮助图"的兜底路径');
+  ok(/不要自己编一个能跑的指令/.test(src), '要求听不懂时据实说而非硬凑');
 
-  // 2) 必须显式授权翻译，否则模型会死板地"原样转发"
-  ok(/翻译成 Kokomi 指令|由你翻译成正确指令/.test(prompt) || /由你翻译成正确指令|翻译成正确指令/.test(toolDesc),
-    '明确授权"把自然语言翻译成指令"');
+  // ③ 工具描述
+  ok(/由你翻译成正确指令/.test(src), '工具描述里说明了可翻译');
+  ok(/command="me recent 7"/.test(src), '工具描述给出了翻译示例');
+  ok(/不许编造参数/.test(src), '工具描述里有防编造约束');
+}
 
-  // 3) 同时必须有防滥用约束
-  ok(/绝不猜|不许编造/.test(prompt) || /不许编造/.test(toolDesc), '明确禁止编造参数（服务器/昵称/船名）');
+console.log('\n— 动态提示词片段：只在触发那一轮注入 —');
+{
+  const plugin = await import(pathToFileURL(path.join(HERE, 'index.js')).href);
+  const tools = new Map();
+  const settings = { ...manifest.settings };
+  const api = {
+    config: () => ({ ...settings }),
+    registerTool: (d) => { tools.set(d.id, d); return d.id; },
+    log: () => {}, warn: () => {}, error: () => {}
+  };
+  plugin.setup(api);
+  const ctxKey = 'group:selftest-dyn';
 
-  // 4) 听不懂时的兜底：引导看帮助图，而不是瞎编一个能跑的指令
-  ok(prompt.includes('帮助图'), '提示词给出"看帮助图"的兜底路径');
-  ok(/不要再自己编|不要自己编一个能跑的指令|据实说/.test(prompt), '提示词要求听不懂时据实说');
+  // 没触发 → 不该注入（这是省提示词预算的关键）
+  eq(plugin.promptSections({ chatKey: ctxKey }), [], '未触发时不注入任何片段');
+  eq(plugin.promptSections({}), [], '没有 chatKey 时安全返回空');
 
-  // 5) 工具描述里也要提翻译（模型选工具时只读它）
-  ok(/由你翻译成正确指令/.test(toolDesc), '工具描述里也说明了可翻译');
-  ok(/command="me recent 7"/.test(toolDesc), '工具描述给出了翻译示例');
-  ok(/不许编造参数/.test(toolDesc), '工具描述里也有防编造约束');
+  // 触发 → 注入一段，且内容是指令表
+  const entry = { id: 1, senderId: '1000000001', senderName: '老八', text: '@机器人(QQ:2) kokomi me recent' };
+  await plugin.hooks['before-context']({
+    triggerEntries: [entry], store: {}, memory: {},
+    chatKey: ctxKey, chatId: '1', selfId: '2', selfNickname: '机器人'
+  });
+  ok(entry.text.includes('【kokomi 指令已认领】'), '钩子已认领');
+
+  const dyn = plugin.promptSections({ chatKey: ctxKey });
+  eq(dyn.length, 1, '触发后注入恰好一个片段');
+  ok(dyn[0]?.id === 'kokomi-helper-command-table', '片段 id 正确', dyn[0]?.id);
+  ok(String(dyn[0]?.content ?? '').includes('me recent'), '注入的片段含指令表');
+  ok(/绝不猜/.test(String(dyn[0]?.content ?? '')), '注入的片段含防编造约束');
+  ok(Number(dyn[0]?.priority) > 0 && Number(dyn[0]?.priority) < 99, 'priority 在安全上限内');
+
+  // 一次性：消费后不应再注入（避免泄漏到后续轮次）
+  eq(plugin.promptSections({ chatKey: ctxKey }), [], '同一会话第二次调用不再注入（单轮一次性）');
+
+  // 未触发的会话始终为空
+  eq(plugin.promptSections({ chatKey: 'group:other' }), [], '其他会话不受影响');
+
+  // 未命中触发判定时也不该注入
+  const noAt = { id: 2, senderId: '1000000001', senderName: '老八', text: 'kokomi me' };
+  await plugin.hooks['before-context']({
+    triggerEntries: [noAt], store: {}, memory: {},
+    chatKey: 'group:noat', chatId: '1', selfId: '2', selfNickname: '机器人'
+  });
+  eq(plugin.promptSections({ chatKey: 'group:noat' }), [], '没 @ 机器人时不注入片段');
+
+  await plugin.deactivate?.();
 }
 
 console.log('\n— 配置读取与规整 —');

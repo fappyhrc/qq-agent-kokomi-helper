@@ -69,7 +69,7 @@ autoSend（file → URL → base64 三级回退）
 |---|---|---|
 | `before-context` 钩子 | **不解析** | 只要 `@机器人` + `kokomi` 在最前就认领，命中面尽可能宽；钩子有 5 秒硬超时，也不适合做多轮澄清 |
 | `kokomi-query` 工具 | **不解析** | `command` 是自由文本，模型可把自然语言翻译后填入 |
-| 提示词 + 工具描述 | **承载"目标语言"** | 这里放权威指令表，模型据此翻译 |
+| 提示词 | **承载"目标语言"** | 指令表放在这里，模型据此翻译 |
 | Kokomi 服务 | 只认标准指令 | 认不出会回「输入的指令或参数有误」 |
 
 所以"自主判定"实际上是**提示词工程**，不是代码分支。两点必须同时存在，缺一不可：
@@ -81,17 +81,51 @@ autoSend（file → URL → base64 三级回退）
 
 第 3 条兜底：听不懂时**据实说查不了并引导发 `kokomi help`**，而不是硬凑一个能跑的指令。
 
-指令表来源：服务端 `help` 图（实测下载后逐条核对）。`selfcheck.mjs` 里有 20 条断言钉住
-"指令表 + 授权 + 防编造 + 兜底路径"四件事——改动提示词时若有断言挂掉，
-先确认是不是把这张表删了。
+### 1.2 提示词按需注入：指令表只在触发那一轮进提示词
 
-### 1.2 为什么查询不放在钩子里
+指令表约 1 KB，只有触发时才有用。若写进 `plugin.json` 的 `prompt.sections`，
+它会**每一轮**都进系统提示词（群里绝大多数消息与 kokomi 无关），白占预算。
+
+核心恰好留了口子，而且**执行顺序正合适**：
+
+```
+src/orchestrator.js:759   // 提示词组装之前先跑 before-context
+src/orchestrator.js:763   await skillManager.runHook('before-context', { … })
+
+src/plugin-loader.js:434  promptSections: typeof mod.promptSections === 'function' ? mod.promptSections : null
+src/skills/manager.js:407 getPromptSections(context)   ← 每轮组装提示词时调用
+```
+
+于是插件导出 `promptSections(context)`，配合钩子里的单轮标记实现按需注入：
+
+```
+钩子认领 kokomi 指令 → kokomiTurns.set(chatKey, true)
+                      ↓（同一个 chatKey，紧接着组装提示词）
+promptSections(context) → 命中则返回指令表片段，并立即 delete 标记
+```
+
+三个必须注意的点：
+
+1. **`promptSections` 的 context 里没有 `triggerEntries`**（只有 `chatKey`/`kind`/`chatId`/…），
+   所以**不能靠读消息文本判断**，只能靠钩子留的标记 —— 这也是标记必须写在钩子里的原因。
+2. **标记是单轮一次性的**：`promptSections` 消费后 `delete`。
+   否则一次触发会让指令表在后续每一轮重复注入。
+3. **片段 priority 必须 ≤ 99**（`manager.js` 会夹到 99；核心安全规则永远排在 Skill 片段之前）。
+   本插件动态片段用 58，低于常驻片段的 61。
+
+实测效果：常驻片段从 **1688 → 289 字符**（每轮省 1399），指令表只在 kokomi 轮次出现。
+`selfcheck.mjs` 里有 11 条断言钉住这个机制（未触发不注入 / 触发注入一次 / 消费后不再注入 /
+没 @ 不注入 / 其他会话不受影响）。
+
+指令表来源：服务端 `help` 图（实测下载后逐条核对）。
+
+### 1.3 为什么查询不放在钩子里
 
 钩子硬超时 5 秒（核心 `src/skills/manager.js` 的 `DEFAULT_HOOK_TIMEOUT_MS`），
 而一次查询是「服务端取数 + 渲染 + 插件下载图片」，实测数秒。因此钩子只认领，
 查询交给没有时限的工具。
 
-### 1.3 为什么不需要桥接
+### 1.4 为什么不需要桥接
 
 桥接只在一种情况下必需：**出图必须在一台能起 Python 进程的机器上完成**
 （Node 跑不了 Pillow/OpenCV，而且上游用相对导入、配置写死在类属性上）。
@@ -182,7 +216,7 @@ GET  <botUrl>?token=<口令>&message=<指令>&platform=<平台>
 ## 4. 自检
 
 ```bash
-# 离线自检（103 项）：触发判定 / 隔离断言 / URL 拼装 / 响应归一化 / 翻译能力 / 配置规整 / 文本组装
+# 离线自检（116 项）：触发判定 / 隔离断言 / URL 拼装 / 响应归一化 / 翻译能力 / 配置规整 / 文本组装
 node selfcheck.mjs
 
 # 真服务端到端验证（会访问网络）
@@ -195,7 +229,7 @@ node live-test.mjs 1000000001       # 额外验证真实查询与图片下载（
 
 | 自检 | 结果 |
 |---|---|
-| `selfcheck.mjs` | **103 通过 / 0 失败** |
+| `selfcheck.mjs` | **116 通过 / 0 失败** |
 | `live-test.mjs`（不带参数） | **11 通过 / 0 失败 / 2 跳过** |
 | `live-test.mjs <已绑定user_id>` | **17 通过 / 0 失败**（真实查询 → 真实 JPEG） |
 
@@ -224,7 +258,7 @@ Kokomi 的绑定存在服务端，用一个没绑定过的 ID 调 `me`，服务�
 plugins/kokomi-helper/
 ├── plugin.json          清单：19 项设置 + configSchema + 提示词片段
 ├── index.js             入口：钩子（确定性认领）+ 2 个工具
-├── selfcheck.mjs        离线自检（103 项）
+├── selfcheck.mjs        离线自检（116 项）
 ├── live-test.mjs        真服务端到端验证（可选，访问真实服务）
 ├── lib/
 │   ├── api.js           直连 Kokomi 服务（URL 拼装 / 响应归一化 / 图片下载）

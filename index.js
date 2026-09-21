@@ -63,11 +63,61 @@ const triggerSender = new Map();
 /** 最近一次查询结果：`chatKey → result`（供 `kokomi-send-image` 补发）。 */
 const lastResult = new Map();
 
+/**
+ * 本轮"已认领 kokomi 指令"的会话标记：`chatKey → true`。
+ *
+ * 存在的唯一目的：把**指令表按需注入**提示词。核心在每次运行里先跑
+ * `before-context` 钩子、再组装系统提示词（`orchestrator.js` 明确写了这个顺序），
+ * 而插件可以导出 `promptSections(context)` 参与组装（`manager.js`）。
+ * 于是钩子在这里做标记、`promptSections` 读取它，就能做到
+ * **只有本轮真的是 kokomi 指令时**才把那张指令表塞进提示词。
+ *
+ * 为什么值得这么做：指令表（约 1 KB）只在触发时才有用，常驻会白占每一轮的提示词预算。
+ *
+ * ⚠️ 这是**单轮一次性标记**：`promptSections` 消费后立即删除，避免泄漏到后续轮次。
+ */
+const kokomiTurns = new Map();
+
 /** 机器人自身身份缓存（用于判断"@ 的是不是我"）。 */
 const selfInfo = { id: '', nickname: '', at: 0 };
 
 /** 会话键上限：只保留最近这么多条，避免长跑进程里无界增长。 */
 const MAX_TRACKED = 50;
+
+/**
+ * **触发时才注入**的提示词正文：指令表 + 翻译授权 + 防编造 + 兜底。
+ *
+ * 为什么不写进 `plugin.json` 的 prompt.sections：那是**常驻**片段，每一轮都会进提示词；
+ * 而这一整段只在"本轮消息是 kokomi 指令"时才有用。放进这里由 `promptSections` 按需返回，
+ * 常态下不占提示词预算。
+ *
+ * 三件事必须同时说清（少一件就会出问题）：
+ *   1. **授权翻译** —— 不写，模型会倾向"原样转发"，自然语言直接变成服务端的「指令有误」；
+ *   2. **禁止编造参数** —— 不写，模型可能为了把活干完而猜服务器/船名，等于输出错误战绩；
+ *   3. **兜底路径** —— 听不懂时据实说查不了并引导看帮助图，而不是硬凑一个能跑的指令。
+ */
+const KOKOMI_PROMPT = [
+  '本轮群友发的是 **Kokomi 战绩查询指令**。触发词后面的内容会交给 Kokomi 服务，服务把战绩渲染成图片返回；系统已自动附上真实结果。',
+  '',
+  '**你可以把自然语言翻译成 Kokomi 指令**（这是被允许的，不算"编造"）：群友不必背指令表。例如',
+  '「帮我看看我最近的战绩」→ `me recent 7` ｜「查一下欧服的某人」→ `me eu <昵称>` ｜「大和这条船我打得怎么样」→ `me ship 大和`。',
+  '拿不准时**先用最接近的写法调一次工具**，而不是反复追问。',
+  '',
+  '**但不许编造参数**：服务器、昵称、赛季、船名、筛选词都必须来自群友的原话，**绝不猜**。缺哪个就用一句话问清那一个（例如"哪个服？船名是？"），不要一次抛一堆问题。',
+  '',
+  '指令表（`<>` 必填，`[]` 可选）——服务端只认这些，翻译时要落到这张表上：',
+  '- 查自己：`me` 总水表 ｜ `me info` 详细 ｜ `me oper` 行动 ｜ `me cw` 军团战 ｜ `me rank [赛季]` 排位 ｜ `me ship <船名>` 单船 ｜ `me ships <筛选词>` 船列表 ｜ `me [pvp/rank] recent [数量] [船名]` 近期（如 `me recent 7`、`me recent 30 大和`）｜ `me recents` 最近20场',
+  '- 查别人：`me <服务器> <昵称>`（如 `me asia TestNotExist`），后面可接 `info` / `oper` / `cw` / `rank` / `ship <船名>` / `recent …`',
+  '- 公会：`me clan [赛季]`、`me clan history`；公会历史等其他公会指令同上',
+  '- 绑定与设置：`bind <服务器> <昵称>` 绑定 ｜ `me bind` 查绑定 ｜ `me lang <cn/en/ja>` 换语言 ｜ `me pr <hide/pr>` 开关评分 ｜ `me recent on` 启用近期记录',
+  '- 服务器取值：`cn` `asia` `eu` `na` `ru`（服务端也认中文别名，但优先用英文）',
+  '- 其它：`me online` 在线人数 ｜ `me stats` 服务端统计 ｜ `me search <筛选词>` 查可用筛选词 ｜ `help` 帮助图',
+  '',
+  '**指令表里没有的能力就别猜**：服务对不属于上表的写法会回「输入的指令或参数有误」。这种情况不要自己编一个能跑的指令，而是据实说"这条我可以帮你换成最接近的 X 来查"，或让群友发 `kokomi help` 看帮助图。',
+  '',
+  '服务返回文字时（例如未绑定：「请先绑定游戏账号，发送\'wws help\'可查询帮助文档」），注意那句里的 **wws 是上游服务自己的写法**，本插件里要换成 kokomi。你只需用一句话提醒他绑定（`kokomi bind <服务器> <昵称>`），不要原样照念含 wws 的整句。',
+  '若同时出现 yuyuko 与 kokomi 两个数据源的结果，注意它们是**不同来源**，不要混在一起比较或相加。'
+].join('\n');
 
 /** 简单的 LRU 写入：超出上限时淘汰最旧的一条。 */
 function remember(map, key, value) {
@@ -438,6 +488,7 @@ export async function deactivate() {
   triggerMsg.clear();
   triggerSender.clear();
   lastResult.clear();
+  kokomiTurns.clear();
 }
 
 /**
@@ -448,6 +499,34 @@ export async function deactivate() {
  */
 export function available() {
   return { ok: true };
+}
+
+/**
+ * 动态提示词片段：**只在本轮是 kokomi 指令时**注入指令表。
+ *
+ * 调用时机由核心决定：每次运行先跑 `before-context` 钩子、再组装系统提示词
+ * （`src/orchestrator.js`），而这里由 `src/skills/manager.js` 的
+ * `getPromptSections(context)` 调用。因此钩子里的标记对本函数可见。
+ *
+ * @param {{chatKey?: string, kind?: string}} [context] 核心传入的会话上下文。
+ *   ⚠️ 它**不含** `triggerEntries`，所以不能靠读消息文本判断，只能靠钩子留的标记。
+ * @returns {Array<{id: string, title: string, content: string, priority: number}>}
+ *   命中时返回恰好一个片段；否则返回空数组（= 常态下不占提示词预算）。
+ * @remarks 标记是**单轮一次性**的：这里消费后立即删除，避免泄漏到后续轮次。
+ *   若同一轮有多条消息触发，钩子写同一个键，这里仍然只注入一次。
+ */
+export function promptSections(context = {}) {
+  const key = String(context?.chatKey ?? '');
+  if (!key) return [];
+  if (!kokomiTurns.has(key)) return [];
+  kokomiTurns.delete(key);   // 一次性：本轮注入过就不再重复
+  return [{
+    id: 'kokomi-helper-command-table',
+    title: '战舰世界（kokomi）指令',
+    content: KOKOMI_PROMPT,
+    // 比常驻片段（61）略低：常驻的结论约束先讲，再讲怎么翻译
+    priority: 58
+  }];
 }
 
 /** 钩子集合：只提供一个 `before-context`，做确定性认领。 */
@@ -488,6 +567,10 @@ export const hooks = {
       const senderId = String(entry?.senderId ?? entry?.userId ?? '').trim();
       if (senderId) remember(triggerSender, chatKey, senderId);
       if (entry?.id !== undefined && entry?.id !== null) remember(triggerMsg, chatKey, entry.id);
+
+      // 标记"本轮有 kokomi 指令"，供 promptSections 决定是否注入指令表。
+      // 必须在钩子里做：promptSections 拿不到 triggerEntries，只有 chatKey。
+      if (chatKey) remember(kokomiTurns, chatKey, true);
 
       const cmd = hit.command || '';
       const note = [
