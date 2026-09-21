@@ -289,13 +289,20 @@ function registerTools(api) {
   api.registerTool({
     id: 'kokomi-query',
     name: 'Kokomi 战舰世界查询',
-    // description 是模型判断"要不要调用"的唯一依据，必须写清"做什么"与"何时用"
+    // description 是模型判断"要不要调用"的唯一依据，必须同时写清"做什么"与"何时用"。
+    // 这里明确授权"把自然语言翻译成指令"：群友不必背指令表，但参数（服务器/昵称/船名等）
+    // 必须来自原话，不许猜。
     description:
       '查询战舰世界（World of Warships）玩家战绩，数据来自 Kokomi（与 yuyuko 不同的另一个数据源），'
-      + '结果通常是一张渲染好的战绩长图。参数 command 只填触发词 kokomi 后面的部分。'
-      + '例：command="me"（查自己，需先绑定）、command="recent"（近期）、command="ship 大和"（单船）、'
-      + 'command="link asia 昵称"（绑定账号）、command="help"（帮助）。'
-      + '什么时候用：群里有人用 kokomi 问战绩，或你判断需要 Kokomi 的数据来把话接下去。'
+      + '结果通常是一张渲染好的战绩长图。'
+      + '【command 怎么填】填 Kokomi 指令（触发词之后的正文），不要带 kokomi 前缀。'
+      + '群友用自然语言描述时，**由你翻译成正确指令**（这是允许的），例如'
+      + '「小鲸鱼最近打得怎么样」→ command="me recent 7"；「查一下欧服的某人」→ command="me eu 某人"。'
+      + '常用写法：command="me"（自己总水表，需先绑定）、"me info"/"me oper"/"me cw"/"me rank"、'
+      + '"me ship 大和"（单船）、"me recent 7"（近期）、"me asia 昵称"（查别人）、'
+      + '"me clan"（公会）、"bind asia 昵称"（绑定）、"help"（帮助图）。'
+      + '【不许编造参数】服务器、昵称、赛季、船名必须来自群友原话；缺了就用一句话问清那一个，不要猜。'
+      + '【什么时候用】群里有人用 kokomi 问战绩，或你判断需要 Kokomi 的数据来把话接下去。'
       + '返回的是真实结果，照它说即可，不要自己编。',
     category: 'query',
     icon: '🐟',

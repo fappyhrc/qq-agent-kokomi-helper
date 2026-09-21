@@ -145,6 +145,38 @@ eq(manifest.settings.upstreamKeyword, 'wws', '发给服务的触发词前缀（�
 ok(!('bridgeUrl' in manifest.settings), '纯 Node 化后不再有「桥接服务地址」设置');
 ok(!('kokomiApiUsername' in manifest.settings), '不再有 v4 的接口用户名设置');
 
+console.log('\n— 自然语言 → 指令 的翻译能力（提示词里必须保留）—');
+{
+  // 这条能力靠"提示词 + 工具描述"共同实现，缺一处模型就不敢翻译。
+  // 改动提示词时若有测试挂掉，先想清楚是不是把这张指令表删了。
+  const prompt = manifest.prompt.sections[0].content;
+  const toolDesc = readFileSync(path.join(HERE, 'index.js'), 'utf8');
+
+  // 1) 指令表的关键分支必须在
+  for (const k of ['me', 'me info', 'me oper', 'me cw', 'me rank', 'me ship', 'me recent', 'me recents', 'me clan', 'bind']) {
+    ok(prompt.includes(`\`${k}`) || prompt.includes(`${k} `) || prompt.includes(`\`${k}\``), `提示词含指令分支：${k}`);
+  }
+  ok(prompt.includes('me <服务器> <昵称>'), '提示词含"查别人"的写法');
+  ok(prompt.includes('服务器取值'), '提示词含服务器取值说明');
+  ok(prompt.includes("'cn'") || prompt.includes('`cn`'), '提示词列出服务器枚举');
+
+  // 2) 必须显式授权翻译，否则模型会死板地"原样转发"
+  ok(/翻译成 Kokomi 指令|由你翻译成正确指令/.test(prompt) || /由你翻译成正确指令|翻译成正确指令/.test(toolDesc),
+    '明确授权"把自然语言翻译成指令"');
+
+  // 3) 同时必须有防滥用约束
+  ok(/绝不猜|不许编造/.test(prompt) || /不许编造/.test(toolDesc), '明确禁止编造参数（服务器/昵称/船名）');
+
+  // 4) 听不懂时的兜底：引导看帮助图，而不是瞎编一个能跑的指令
+  ok(prompt.includes('帮助图'), '提示词给出"看帮助图"的兜底路径');
+  ok(/不要再自己编|不要自己编一个能跑的指令|据实说/.test(prompt), '提示词要求听不懂时据实说');
+
+  // 5) 工具描述里也要提翻译（模型选工具时只读它）
+  ok(/由你翻译成正确指令/.test(toolDesc), '工具描述里也说明了可翻译');
+  ok(/command="me recent 7"/.test(toolDesc), '工具描述给出了翻译示例');
+  ok(/不许编造参数/.test(toolDesc), '工具描述里也有防编造约束');
+}
+
 console.log('\n— 配置读取与规整 —');
 bindConfig(() => ({
   triggerKeywords: ['@Kokomi ', ''],

@@ -49,7 +49,24 @@
 两个条件缺一不可：**@ 了机器人本人** + **`kokomi` 是去掉 @ 之后的第一个词**。
 `kokomi` 后面的内容会交给 Kokomi 服务。
 
-### 2.2 没绑定时会怎样
+### 2.2 可以用大白话，不必背指令表
+
+`kokomi` 后面**不要求写成标准指令**。你可以直接说人话，AI 会翻成正确指令再查：
+
+| 你可以这样说 | AI 实际执行的查询 |
+|---|---|
+| `kokomi 帮我看看我最近的战绩` | `me recent 7` |
+| `kokomi 小鲸鱼最近打得怎么样` | `me recent 7`（查自己时是 `me`） |
+| `kokomi 查一下欧服的 TestNotExist` | `me eu TestNotExist` |
+| `kokomi 我这周开工了没` | `me recent 7` |
+| `kokomi 大和这条船我打得怎么样` | `me ship 大和` |
+
+**但它不会替你编参数**：服务器、昵称、船名这些必须是你自己说的。
+缺了关键信息（比如"查一下某人"却没说是哪个服），它会先反问你一句，而不是随便猜一个。
+
+听不懂的写法它会**如实说查不了**，并建议你发 `kokomi help` 看帮助图——不会硬凑一个结果。
+
+### 2.3 没绑定时会怎样
 
 服务会回一句文字：
 
@@ -60,21 +77,28 @@
 注意那句里的 `wws` 是**服务端自己的写法**——在本插件里要换成 `kokomi`
 （即发 `@机器人 kokomi help`）。绑定后 `kokomi me` 才会出图。
 
-### 2.3 常用指令
+### 2.4 常用指令（想写标准写法时参考）
 
 | 群里发送 | 作用 |
 |---|---|
-| `kokomi help` | 帮助 |
-| `kokomi link <服务器> <昵称>` | 绑定账号 |
+| `kokomi help` | 帮助图（**最全的指令表就在这张图里**） |
+| `kokomi bind <服务器> <昵称>` | 绑定账号 |
+| `kokomi me bind` | 查看当前绑定 |
 | `kokomi me` | 自己的总体水表 |
-| `kokomi recent` | 近期战绩 |
-| `kokomi ship 大和` | 单船战绩 |
-| `kokomi clan` | 公会信息 |
+| `kokomi me info` | 详细水表 |
+| `kokomi me recent 7` | 近期战绩（也可 `recent 30`） |
+| `kokomi me ship 大和` | 单船战绩 |
+| `kokomi me oper` / `me cw` / `me rank` | 行动 / 军团战 / 排位 |
+| `kokomi me clan` | 公会信息 |
+| `kokomi me <服务器> <昵称>` | 查别人（如 `me asia TestNotExist`） |
+| `kokomi me online` | 服务器在线人数 |
+| `kokomi me lang cn/en/ja` | 切换出图语言 |
+| `kokomi me pr hide/pr` | 关闭/开启评分显示 |
 
 > 服务器取值：`asia` / `eu` / `na` / `ru` / `cn`。
-> 完整指令表见上游 `Kokomi_Bot` 的 `docs/command.md`。
+> 完整指令表以 `kokomi help` 那张图为准（各服务端版本可能略有差异）。
 
-### 2.4 和 yuyuko 插件一起用
+### 2.5 和 yuyuko 插件一起用
 
 ```
 @机器人 yuyuko me      ← yuyuko 数据源
