@@ -1,0 +1,6 @@
+# 统一换行：仓库内一律 LF，检出时按平台
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary
