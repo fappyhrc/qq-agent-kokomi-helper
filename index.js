@@ -40,6 +40,7 @@ import {
 } from './lib/api.js';
 import { buildContextNote, formatResultText } from './lib/format.js';
 import { extractMentions, isBotMentioned, matchTrigger } from './lib/trigger.js';
+import { clearClaims, hasClaim, markClaim } from './lib/claim-window.js';
 import * as imageStore from './lib/image-store.js';
 import * as imageServer from './lib/image-server.js';
 
@@ -201,11 +202,14 @@ function selfNames(ctx) {
  * @param {string} params.command 触发词之后的正文。
  * @param {string} params.userId 触发者 ID。
  * @param {object} [params.ctx] 上下文（取 chatId / selfId）。
+ * @param {{userId?: string, fromTrigger?: boolean}} [params.queried]
+ *   "查的是谁"的记录，用于结果标注与发图备注 —— 这是**发现查错人**的唯一线索：
+ *   图是自动发的，图上不写归属，发错了群里看不出来。
  * @returns {Promise<object>} 统一的查询结果对象。
  * @remarks 这里是**唯一**发起网络请求的地方：先拿结果，再按需下载图片。
  *   钩子路径与工具路径共用它，避免两处逻辑漂移。
  */
-async function handleQuery({ command, userId, ctx = {} }) {
+async function handleQuery({ command, userId, ctx = {}, queried = null }) {
   const c = cfg();
   const { platformId, channelId } = platformFor(ctx);
   const started = Date.now();
@@ -221,7 +225,10 @@ async function handleQuery({ command, userId, ctx = {} }) {
     sentInfo: null,
     image: null,
     oversized: false,
-    upstreamKind: ''
+    upstreamKind: '',
+    // 查询主体：进结果文案、进发图备注、也进 debug 日志
+    queriedUserId: String(queried?.userId || userId || ''),
+    queriedFromTrigger: queried ? queried.fromTrigger !== false : true
   };
 
   try {
@@ -270,7 +277,9 @@ async function handleQuery({ command, userId, ctx = {} }) {
   if (c.debug) {
     // ⚠️ 日志里不要带 token：URL 会被拼进日志的话记得脱敏
     const size = result.image ? ` 图 ${Math.round(result.image.bytes / 1024)}KB` : ' 无图';
-    log(`kokomi 查询完成："${command}" ${result.status} ${result.elapsedMs}ms${size}`);
+    // 把"查的是谁"打进日志：排查"查到别人水表"时这是第一手线索
+    const who = result.queriedUserId ? ` user_id=${result.queriedUserId}` : ' user_id=?';
+    log(`kokomi 查询完成："${command}"${who} ${result.status} ${result.elapsedMs}ms${size}`);
   }
   return result;
 }
@@ -295,11 +304,15 @@ function attachImage(image) {
  *
  * @param {object} ctx 工具/钩子上下文。
  * @param {object} image 图片对象（`attachImage` 之后）。
+ * @param {object} [meta] 附加信息（`queriedUserId` 等）。
  * @returns {Promise<{ok: boolean, error?: string}|null>} 未发送时返回 `null`。
  * @remarks 必须走 `ctx.sender.sendImage` 而不是 `onebot.send*`：只有前者会经过
  *   发送队列的限频、去重与留档。三级回退顺序：本地文件 → 本地图片服务 URL → base64。
+ *
+ *   `note` 里带上触发者 QQ：图是自动发的，如果不标归属，"查错水表"在群里**看不出来**。
+ *   留档里能对上人，才谈得上排查。
  */
-async function autoSend(ctx, image) {
+async function autoSend(ctx, image, meta = {}) {
   const c = cfg();
   if (!c.autoSendImage || !image) return null;
   const sender = ctx?.sender;
@@ -308,7 +321,8 @@ async function autoSend(ctx, image) {
     return { ok: false, error: 'no-sender' };
   }
   const chatKey = sessionKeyOf(ctx);
-  const options = { note: 'kokomi 战绩图' };
+  const who = String(meta.queriedUserId || '').trim();
+  const options = { note: who ? `kokomi 战绩图（查 QQ:${who}）` : 'kokomi 战绩图' };
   if (c.replyToTrigger && triggerMsg.has(chatKey)) options.replyToMessageId = triggerMsg.get(chatKey);
   if (c.atTriggerUser && triggerSender.has(chatKey)) options.atUserId = triggerSender.get(chatKey);
 
@@ -352,7 +366,9 @@ function registerTools(api) {
       + '"me ship 大和"（单船）、"me recent 7"（近期）、"me asia 昵称"（查别人）、'
       + '"me clan"（公会）、"bind asia 昵称"（绑定）、"help"（帮助图）。'
       + '【不许编造参数】服务器、昵称、赛季、船名必须来自群友原话；缺了就用一句话问清那一个，不要猜。'
-      + '【什么时候用】群里有人用 kokomi 问战绩，或你判断需要 Kokomi 的数据来把话接下去。'
+      + '【什么时候用】**只有**当消息里出现【kokomi 查询结果】或【kokomi 指令已认领】时才调用 ——'
+      + '也就是群友真的发了「@机器人 kokomi <指令>」。群友没发 kokomi 时不要主动查（工具会拒绝）：'
+      + '话题聊到战舰世界、战绩、水表都不构成理由，想查就让群友自己发指令。'
       + '返回的是真实结果，照它说即可，不要自己编。',
     category: 'query',
     icon: '🐟',
@@ -382,6 +398,20 @@ function registerTools(api) {
         return { content: '缺少 command：请填 kokomi 后面的指令正文，例如 "me" 或 "help"。', isError: true };
       }
       const chatKey = sessionKeyOf(ctx);
+
+      // ── 硬闸：本轮没有 kokomi 触发就不许查 ────────────────────────────────
+      // 实测教训：只靠工具描述里写"什么时候用"，模型会在完全无关的轮次自作主张
+      // 去查（"你判断需要 Kokomi 的数据"被当成了授权）。这里改成确定性判定 ——
+      // 凭据由 before-context 钩子在真正命中触发时写入。
+      if (!hasClaim(chatKey)) {
+        return {
+          content: '本轮消息里没有 kokomi 指令，不能发起查询。'
+            + '如果确实要查，请让群友发「@机器人 kokomi <指令>」（例如「@机器人 kokomi me」）后你再调这个工具。'
+            + '不要自己替群友决定去查战绩。',
+          isError: true
+        };
+      }
+
       const userId = String(params.userId || triggerSender.get(chatKey) || ctx?.senderId || '').trim();
       if (!userId) {
         return {
@@ -389,11 +419,16 @@ function registerTools(api) {
           isError: true
         };
       }
+      // 记录"查的是谁"，供结果标注与自动发图备注使用 —— 这是"查到别人水表"能被发现的关键
+      const queried = {
+        userId,
+        fromTrigger: String(params.userId || '') === '' && triggerSender.get(chatKey) === userId
+      };
 
-      const result = await handleQuery({ command, userId, ctx });
+      const result = await handleQuery({ command, userId, ctx, queried });
       if (result.image) {
         attachImage(result.image);
-        result.sentInfo = await autoSend(ctx, result.image);
+        result.sentInfo = await autoSend(ctx, result.image, { queriedUserId: result.queriedUserId });
         result.sent = result.sentInfo?.ok === true;
       }
       remember(lastResult, chatKey, result);
@@ -422,7 +457,7 @@ function registerTools(api) {
         return { content: '还没有可发送的 Kokomi 战绩图 —— 先用 kokomi-query 查一次。', isError: true };
       }
       attachImage(last.image);
-      const info = await autoSend(ctx, last.image);
+      const info = await autoSend(ctx, last.image, { queriedUserId: last.queriedUserId });
       if (info?.ok) {
         last.sent = true;
         last.sentInfo = info;
@@ -489,6 +524,7 @@ export async function deactivate() {
   triggerSender.clear();
   lastResult.clear();
   kokomiTurns.clear();
+  clearClaims();
 }
 
 /**
@@ -571,6 +607,10 @@ export const hooks = {
       // 标记"本轮有 kokomi 指令"，供 promptSections 决定是否注入指令表。
       // 必须在钩子里做：promptSections 拿不到 triggerEntries，只有 chatKey。
       if (chatKey) remember(kokomiTurns, chatKey, true);
+
+      // 记录**查询凭据**：`kokomi-query` 工具据此判断"本轮是否真的喊过 kokomi"。
+      // 没有这道闸，模型可能在完全无关的轮次自己决定去查（实测出现过）。
+      if (chatKey) markClaim(chatKey);
 
       const cmd = hit.command || '';
       const note = [

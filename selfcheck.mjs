@@ -226,6 +226,81 @@ console.log('\n— 动态提示词片段：只在触发那一轮注入 —');
   await plugin.deactivate?.();
 }
 
+console.log('\n— 防"没喊 kokomi 也去查"：工具硬闸 —');
+{
+  // 实测过的 bug：只靠工具描述写"什么时候用"，模型会在无关轮次自作主张去查。
+  // 所以加了确定性硬闸：只有本轮真的命中过 kokomi 触发，工具才允许执行。
+  const plugin = await import(pathToFileURL(path.join(HERE, 'index.js')).href);
+  const tools = new Map();
+  const api = {
+    config: () => ({ ...manifest.settings }),
+    registerTool: (d) => { tools.set(d.id, d); return d.id; },
+    log: () => {}, warn: () => {}, error: () => {}
+  };
+  plugin.setup(api);
+  const query = tools.get('kokomi-query');
+
+  const ctx = {
+    chatKey: 'group:gate', chatId: '1', selfId: '2', senderId: '1000000001',
+    sender: { sendImage: async () => ({ ok: true }) }
+  };
+
+  // ① 没认领 → 必须拒绝，且不能发网络请求
+  const denied = await query.execute(ctx, { command: 'me' });
+  ok(denied?.isError === true, '未触发时工具拒绝执行');
+  ok(/没有 kokomi 指令/.test(String(denied?.content ?? '')), '拒绝理由说明"本轮没有 kokomi 指令"');
+  ok(!/网络|超时|连不上/.test(String(denied?.content ?? '')), '拒绝发生在发起请求之前（不是网络失败）');
+
+  // ② 触发一次 → 同一个会话随即允许（凭据带 TTL，覆盖同话题续查）
+  await plugin.hooks['before-context']({
+    triggerEntries: [{ id: 1, senderId: '1000000001', senderName: '老八', text: '@机器人(QQ:2) kokomi me' }],
+    store: {}, memory: {}, chatKey: 'group:gate', chatId: '1', selfId: '2', selfNickname: '机器人'
+  });
+  const allowed = await query.execute(ctx, { command: 'me' });
+  // ⚠️ 不要断言 allowed.isError === false：测试环境服务地址是 127.0.0.1:1，
+  //    必然连不上，isError 为 true 是正常的。**关键判据是"过了闸"**：
+  //    结果里不再出现闸的拒绝语，说明它真的走到了网络阶段。
+  ok(!/没有 kokomi 指令/.test(String(allowed?.content ?? '')), '触发后过了闸（不再被闸拒绝）');
+  ok(/【kokomi 查询结果】/.test(String(allowed?.content ?? '')), '触发后返回的是查询结果块（已进入查询流程）');
+
+  // ③ 另一个会话没触发 → 仍然拒绝（凭据按会话隔离）
+  const otherCtx = { ...ctx, chatKey: 'group:other' };
+  const denied2 = await query.execute(otherCtx, { command: 'me' });
+  ok(/没有 kokomi 指令/.test(String(denied2?.content ?? '')), '凭据按会话隔离：别的会话仍被拒');
+
+  // ④ 结果里必须标明"查的是谁"（发现查错水表的唯一线索）
+  ok(/查询主体/.test(String(allowed?.content ?? '')), '结果标注查询主体');
+  ok(/1000000001/.test(String(allowed?.content ?? '')), '标注里带上了触发者 QQ');
+
+  await plugin.deactivate?.();
+}
+
+console.log('\n— 凭据窗口（lib/claim-window.js） —');
+{
+  const cw = await import(pathToFileURL(path.join(HERE, 'lib', 'claim-window.js')).href);
+  cw.clearClaims();
+  eq(cw.hasClaim('group:a'), false, '初始没有凭据');
+  cw.markClaim('group:a');
+  eq(cw.hasClaim('group:a'), true, '标记后认账');
+  eq(cw.hasClaim('group:b'), false, '不同会话互不影响');
+  eq(cw.hasClaim(''), false, '空键安全返回 false');
+  ok(cw.claimAge('group:a') > 0, '凭据有剩余寿命');
+  cw.clearClaims();
+  eq(cw.hasClaim('group:a'), false, 'clearClaims 后失效');
+}
+
+console.log('\n— 提示词与工具描述：不许主动查 —');
+{
+  const staticSection = manifest.prompt.sections[0].content;
+  const src = readFileSync(path.join(HERE, 'index.js'), 'utf8');
+  ok(/绝不主动发起/.test(staticSection), '常驻片段明确禁止主动查');
+  ok(/只有.*kokomi 查询结果.*才/.test(staticSection) || /只有当【kokomi 查询结果】/.test(staticSection),
+    '常驻片段给出允许调用的条件');
+  ok(!/或你判断需要/.test(src), '工具描述里已删掉"你判断需要"这类授权');
+  ok(/工具会拒绝/.test(src), '工具描述告知会被拒绝');
+  ok(/想查就让群友/.test(src), '工具描述给出替代做法');
+}
+
 console.log('\n— 配置读取与规整 —');
 bindConfig(() => ({
   triggerKeywords: ['@Kokomi ', ''],
