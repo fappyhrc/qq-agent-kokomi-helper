@@ -39,8 +39,9 @@ import {
   queryKokomi
 } from './lib/api.js';
 import { buildContextNote, formatResultText } from './lib/format.js';
-import { extractMentions, isBotMentioned, matchTrigger } from './lib/trigger.js';
+import { matchTrigger } from './lib/trigger.js';
 import { clearClaims, hasClaim, markClaim } from './lib/claim-window.js';
+import { createSelfIdentity, selfIdFromSnowLuma } from './lib/self-id.js';
 import * as imageStore from './lib/image-store.js';
 import * as imageServer from './lib/image-server.js';
 
@@ -79,8 +80,14 @@ const lastResult = new Map();
  */
 const kokomiTurns = new Map();
 
-/** 机器人自身身份缓存（用于判断"@ 的是不是我"）。 */
-const selfInfo = { id: '', nickname: '', at: 0 };
+/**
+ * 机器人自身身份（判定"@ 的是不是我"要用它）。
+ *
+ * 来源分级：`ctx.selfId` > SnowLuma 账号文件 > 消息里的 @ 提及（仅无歧义时）。
+ * 详见 `lib/self-id.js` 顶部的事故说明 —— **低优先级永远不能覆盖高优先级**，
+ * 否则一条 `@我 @别人 ...` 就会把"我"记成别人，之后所有 kokomi 指令都认不领。
+ */
+const identity = createSelfIdentity();
 
 /** 会话键上限：只保留最近这么多条，避免长跑进程里无界增长。 */
 const MAX_TRACKED = 50;
@@ -153,46 +160,8 @@ function sessionKeyOf(ctx) {
  */
 function platformFor(ctx) {
   const chatId = String(ctx?.chatId ?? '').trim();
-  const selfId = String(ctx?.selfId ?? selfInfo.id ?? '').trim();
+  const selfId = String(ctx?.selfId ?? identity.id ?? '').trim();
   return { platformId: selfId || '0', channelId: chatId || '0' };
-}
-
-/**
- * 从一条消息里学习机器人自身身份（文本形如 `@昵称(QQ:机器人QQ)`）。
- *
- * **只学 QQ 号，绝不学昵称**：`@群友 kokomi me` 中同一位置是别人的名字，
- * 一旦记成机器人昵称，之后所有 `@那个群友` 都会被误判为"@ 了我"。
- *
- * @param {string} text 消息原文。
- * @param {string} [selfId] 调用方给的机器人 QQ（最可信）。
- * @returns {void}
- */
-function learnSelfId(text, selfId) {
-  const id = String(selfId ?? '').trim();
-  if (id) {
-    if (selfInfo.id !== id) selfInfo.id = id;
-    selfInfo.at = Date.now();
-    return;
-  }
-  if (selfInfo.id && Date.now() - selfInfo.at < 10 * 60 * 1000) return;
-  if (!text) return;
-  const parsed = extractMentions(String(text));
-  const withQid = parsed.mentions.filter((m) => m.qid);
-  if (withQid.length) {
-    selfInfo.id = String(withQid[withQid.length - 1].qid);
-    selfInfo.at = Date.now();
-  }
-}
-
-/** 组装机器人自身可能的称呼，交给 `isBotMentioned` 判定。 */
-function selfNames(ctx) {
-  return [
-    String(ctx?.selfId ?? ''),
-    String(ctx?.selfNickname ?? ''),
-    String(ctx?.botName ?? ''),
-    selfInfo.id,
-    selfInfo.nickname
-  ].map((s) => String(s ?? '').trim()).filter(Boolean);
 }
 
 /**
@@ -481,6 +450,17 @@ export function setup(api) {
   imageServer.setLog((m) => api.log(m));
   registerTools(api);
 
+  // 机器人 QQ 号尽早确定：它是 "@ 的是不是我" 的唯一可靠依据。
+  // 拿不到就明确告警 —— 退化到"从消息 @ 提及里学"时，多 @ 的群聊会误判。
+  const knownSelfId = selfIdFromSnowLuma();
+  if (knownSelfId) {
+    identity.set(knownSelfId, 'snowluma');
+    api.log(`机器人 QQ 已确定：${knownSelfId}（来源：SnowLuma 账号文件）`);
+  } else {
+    api.warn('未能自动确定机器人 QQ 号（SnowLuma 账号文件里没找到匹配的令牌）——'
+      + '将退化到「从消息 @ 提及里学习」，群里同时 @ 多人时可能误判触发。');
+  }
+
   api.log('已加载：@机器人 kokomi 指令将直接交给 Kokomi 服务查询出图（纯 Node，无需本地 Python）');
 
   const c = cfg();
@@ -586,17 +566,21 @@ export const hooks = {
       const text = String(entry?.text ?? '');
       if (!text) continue;
 
-      // 先学习机器人身份（判定"@ 的是不是我"要用它）
-      learnSelfId(text, context?.selfId);
+      // 先确定机器人身份（判定"@ 的是不是我"要用它）。
+      // 注意：**绝不能用"最后一个 @ 提及"这种猜法** —— 一条 `@我 @别人 ...` 会把别人
+      // 记成自己，此后 10 分钟内所有正确的 @机器人 kokomi 指令都认不领（真实事故）。
+      identity.learn(text, context?.selfId);
 
       const hit = matchTrigger(text, c.triggerKeywords, {
         requireAt: c.requireAt,
-        selfNames: selfNames(context)
+        selfNames: identity.names(context)
       });
       if (!hit.matched) {
         // 判定失败只在 debug 日志里记录：群里聊到 kokomi 是常态，
         // 每次不命中都打日志会把真正有用的信息淹掉。
-        if (c.debug) log(`未认领（${hit.reason}）：${text.slice(0, 60)}`);
+        if (c.debug) {
+          log(`未认领（${hit.reason}，selfId=${identity.id || '?'}/${identity.source || '无'}）：${text.slice(0, 60)}`);
+        }
         continue;
       }
 
