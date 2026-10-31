@@ -38,7 +38,7 @@ import {
   downloadImage,
   queryKokomi
 } from './lib/api.js';
-import { buildContextNote, formatResultText } from './lib/format.js';
+import { buildContextNote, formatResultText, resolveQuerySubject } from './lib/format.js';
 import { matchTrigger } from './lib/trigger.js';
 import { clearClaims, hasClaim, markClaim } from './lib/claim-window.js';
 import { createSelfIdentity, selfIdFromSnowLuma } from './lib/self-id.js';
@@ -388,11 +388,11 @@ function registerTools(api) {
           isError: true
         };
       }
-      // 记录"查的是谁"，供结果标注与自动发图备注使用 —— 这是"查到别人水表"能被发现的关键
-      const queried = {
-        userId,
-        fromTrigger: String(params.userId || '') === '' && triggerSender.get(chatKey) === userId
-      };
+      // 记录"查的是谁"，供结果标注与自动发图备注使用 —— 这是"查到别人水表"能被发现的关键。
+      // ⚠️ 比对的是**两边的 QQ 号**，不是"模型有没有传 userId"：模型通常会把发起人 QQ
+      // 再显式传一遍（提示词里让它这么做），旧写法据此判"不是触发者本人"，给本人查询
+      // 也贴上了「不是触发者本人」的标签（2026-10-31 真实误报，见 lib/format.js 注释）。
+      const queried = resolveQuerySubject(userId, triggerSender.get(chatKey));
 
       const result = await handleQuery({ command, userId, ctx, queried });
       if (result.image) {
